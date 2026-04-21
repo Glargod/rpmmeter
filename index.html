@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Engine RPM Estimator</title>
+  <title>Engine RPM Estimator - iOS Optimized</title>
   <style>
     body { font-family: Arial, sans-serif; text-align: center; background: #111; color: #0f0; margin: 0; padding: 20px; }
     button { padding: 16px 32px; font-size: 19px; margin: 10px; border: none; border-radius: 10px; cursor: pointer; }
     #start { background: #0f0; color: #000; }
     #stop  { background: #f33; color: white; display: none; }
     canvas { width: 100%; max-width: 900px; height: 280px; background: #000; border: 3px solid #0f0; margin: 20px auto; display: block; }
-    #status { font-size: 19px; margin: 15px; min-height: 80px; }
+    #status { font-size: 19px; margin: 15px; min-height: 90px; }
     #rpm { font-size: 48px; font-weight: bold; color: #ff0; margin: 15px 0; }
-    #level { font-size: 22px; color: #aaa; }
+    #level { font-size: 24px; color: #aaa; font-weight: bold; }
     .controls { margin: 20px 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
   </style>
 </head>
 <body>
-  <h1>Engine RPM Estimator</h1>
+  <h1>Engine RPM Estimator (iOS Optimized)</h1>
 
   <div class="controls">
     Cylinders: <input type="number" id="cylinders" value="1" min="1" max="16" style="width:70px">
@@ -33,7 +33,7 @@
   <button id="start">Start Mic + RPM</button>
   <button id="stop">Stop</button>
 
-  <div id="status">1 sec update • Trying to follow fundamental</div>
+  <div id="status">iOS optimized • Hold phone very close to exhaust</div>
   <div id="rpm">Estimated RPM: —</div>
   <div id="level">Sound Level: —</div>
   <canvas id="waveform" width="900" height="280"></canvas>
@@ -43,7 +43,6 @@
     let animationFrame;
     let lastUpdateTime = 0;
     let calibrationMultiplier = 0.10;
-    let lastGoodFreq = 0;
 
     const canvas = document.getElementById('waveform');
     const ctx = canvas.getContext('2d');
@@ -53,8 +52,7 @@
     const rpmDisplay = document.getElementById('rpm');
     const levelDisplay = document.getElementById('level');
 
-    const MIN_LEVEL_THRESHOLD = 12;
-    const MAX_FREQ = 120;
+    const MIN_LEVEL_THRESHOLD = 8;   // lowered for iOS
 
     document.getElementById('multiplier').addEventListener('input', (e) => {
       calibrationMultiplier = parseFloat(e.target.value);
@@ -63,20 +61,29 @@
 
     async function startEverything() {
       startBtn.disabled = true;
-      status.textContent = "Starting...";
+      status.textContent = "Requesting microphone (iOS is picky)...";
 
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ 
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        // iOS-friendly constraints
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,        // request higher sample rate
+            channelCount: 1
+          }
         });
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioContext.state !== 'running') await audioContext.resume();
+        if (audioContext.state !== 'running') {
+          await audioContext.resume();
+        }
 
         const source = audioContext.createMediaStreamSource(mediaStream);
         analyser = audioContext.createAnalyser();
         analyser.fftSize = 2048;
-        analyser.smoothingTimeConstant = 0.8;
+        analyser.smoothingTimeConstant = 0.75;
         source.connect(analyser);
 
         mediaRecorder = new MediaRecorder(mediaStream);
@@ -84,13 +91,14 @@
 
         startBtn.style.display = 'none';
         stopBtn.style.display = 'inline-block';
-        status.textContent = "🔴 Active — 1 second updates";
+        status.textContent = "✅ Mic active — Hold phone VERY close to exhaust tip";
 
         lastUpdateTime = Date.now();
         drawAndEstimate();
 
       } catch (err) {
-        status.textContent = "Error: " + err.message;
+        console.error(err);
+        status.textContent = "Mic error: " + err.message + "\nTry holding phone closer or restart Safari";
         startBtn.disabled = false;
       }
     }
@@ -106,17 +114,13 @@
       const level = sum / dataArray.length;
       levelDisplay.textContent = `Sound Level: ${Math.round(level)}`;
 
-      if (level < MIN_LEVEL_THRESHOLD) {
-        lastGoodFreq = 0;
-        return 0;
-      }
+      if (level < MIN_LEVEL_THRESHOLD) return 0;
 
       let bestOffset = 0;
       let bestScore = -Infinity;
-      const minOffset = 35;                    // start from lower frequencies
-      const maxOffset = Math.floor(audioContext.sampleRate / 15); // up to \~15 Hz min
+      const maxOffset = Math.floor(audioContext.sampleRate / 120);
 
-      for (let offset = minOffset; offset < maxOffset; offset += 2) {
+      for (let offset = 35; offset < maxOffset; offset += 2) {
         let score = 0;
         for (let i = 0; i < dataArray.length - offset; i += 4) {
           score += (dataArray[i] - 128) * (dataArray[i + offset] - 128);
@@ -130,13 +134,7 @@
       if (bestOffset === 0) return 0;
 
       let frequency = audioContext.sampleRate / bestOffset;
-
-      // Prefer lower frequency if scores are close (helps with harmonics)
-      if (lastGoodFreq > 0 && Math.abs(frequency - lastGoodFreq) > 8) {
-        frequency = lastGoodFreq;   // stick to previous if jump is big
-      }
-
-      lastGoodFreq = frequency;
+      if (frequency > 120) frequency = 120;
 
       const cylinders = parseInt(document.getElementById('cylinders').value) || 1;
       const is4Stroke = document.getElementById('stroke').value === "4";

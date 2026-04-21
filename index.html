@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Engine RPM Estimator - iOS Optimized</title>
+  <title>Engine RPM Estimator</title>
   <style>
     body { font-family: Arial, sans-serif; text-align: center; background: #111; color: #0f0; margin: 0; padding: 20px; }
     button { padding: 16px 32px; font-size: 19px; margin: 10px; border: none; border-radius: 10px; cursor: pointer; }
@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <h1>Engine RPM Estimator (iOS Optimized)</h1>
+  <h1>Engine RPM Estimator</h1>
 
   <div class="controls">
     Cylinders: <input type="number" id="cylinders" value="1" min="1" max="16" style="width:70px">
@@ -26,14 +26,14 @@
       <option value="2">2-stroke</option>
     </select><br>
     
-    Calibration: <span id="multiplierValue">0.10</span>
-    <input type="range" id="multiplier" min="0.05" max="0.40" step="0.01" value="0.10" style="width:260px">
+    Calibration: <span id="multiplierValue">0.084</span>
+    <input type="range" id="multiplier" min="0.05" max="0.30" step="0.001" value="0.084" style="width:280px">
   </div>
 
   <button id="start">Start Mic + RPM</button>
   <button id="stop">Stop</button>
 
-  <div id="status">iOS optimized • Hold phone very close to exhaust</div>
+  <div id="status">iOS Optimized • 1 second updates • Calibration: 0.084</div>
   <div id="rpm">Estimated RPM: —</div>
   <div id="level">Sound Level: —</div>
   <canvas id="waveform" width="900" height="280"></canvas>
@@ -42,7 +42,7 @@
     let audioContext, analyser, mediaStream, mediaRecorder;
     let animationFrame;
     let lastUpdateTime = 0;
-    let calibrationMultiplier = 0.10;
+    let calibrationMultiplier = 0.084;
 
     const canvas = document.getElementById('waveform');
     const ctx = canvas.getContext('2d');
@@ -52,33 +52,30 @@
     const rpmDisplay = document.getElementById('rpm');
     const levelDisplay = document.getElementById('level');
 
-    const MIN_LEVEL_THRESHOLD = 8;   // lowered for iOS
+    const MIN_LEVEL_THRESHOLD = 8;
 
     document.getElementById('multiplier').addEventListener('input', (e) => {
       calibrationMultiplier = parseFloat(e.target.value);
-      document.getElementById('multiplierValue').textContent = calibrationMultiplier.toFixed(2);
+      document.getElementById('multiplierValue').textContent = calibrationMultiplier.toFixed(3);
     });
 
     async function startEverything() {
       startBtn.disabled = true;
-      status.textContent = "Requesting microphone (iOS is picky)...";
+      status.textContent = "Requesting microphone...";
 
       try {
-        // iOS-friendly constraints
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
-            sampleRate: 48000,        // request higher sample rate
+            sampleRate: 48000,
             channelCount: 1
           }
         });
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioContext.state !== 'running') {
-          await audioContext.resume();
-        }
+        if (audioContext.state !== 'running') await audioContext.resume();
 
         const source = audioContext.createMediaStreamSource(mediaStream);
         analyser = audioContext.createAnalyser();
@@ -91,14 +88,13 @@
 
         startBtn.style.display = 'none';
         stopBtn.style.display = 'inline-block';
-        status.textContent = "✅ Mic active — Hold phone VERY close to exhaust tip";
+        status.textContent = "✅ Mic active — Hold phone close to exhaust";
 
         lastUpdateTime = Date.now();
         drawAndEstimate();
 
       } catch (err) {
-        console.error(err);
-        status.textContent = "Mic error: " + err.message + "\nTry holding phone closer or restart Safari";
+        status.textContent = "Mic Error: " + err.message;
         startBtn.disabled = false;
       }
     }
@@ -116,11 +112,12 @@
 
       if (level < MIN_LEVEL_THRESHOLD) return 0;
 
+      // Low-frequency focused detection
       let bestOffset = 0;
       let bestScore = -Infinity;
       const maxOffset = Math.floor(audioContext.sampleRate / 120);
 
-      for (let offset = 35; offset < maxOffset; offset += 2) {
+      for (let offset = 40; offset < maxOffset; offset += 2) {
         let score = 0;
         for (let i = 0; i < dataArray.length - offset; i += 4) {
           score += (dataArray[i] - 128) * (dataArray[i + offset] - 128);

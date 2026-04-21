@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Engine RPM Estimator</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; background: #111; color: #0f0; margin: 0; padding: 20px; }
+    button { padding: 16px 32px; font-size: 19px; margin: 10px; border: none; border-radius: 10px; cursor: pointer; }
+    #start { background: #0f0; color: #000; }
+    #stop  { background: #f33; color: white; display: none; }
+    canvas { width: 100%; max-width: 900px; height: 280px; background: #000; border: 3px solid #0f0; margin: 20px auto; display: block; }
+    #status { font-size: 19px; margin: 15px; min-height: 80px; }
+    #rpm { font-size: 48px; font-weight: bold; color: #ff0; margin: 15px 0; }
+    #level { font-size: 22px; color: #aaa; }
+    .controls { margin: 20px 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Engine RPM Estimator</h1>
+
+  <div class="controls">
+    Cylinders: <input type="number" id="cylinders" value="1" min="1" max="16" style="width:70px">
+    <select id="stroke">
+      <option value="4">4-stroke</option>
+      <option value="2">2-stroke</option>
+    </select><br>
+    
+    Calibration: <span id="multiplierValue">0.10</span>
+    <input type="range" id="multiplier" min="0.05" max="0.40" step="0.01" value="0.10" style="width:260px">
+  </div>
+
+  <button id="start">Start Mic + RPM</button>
+  <button id="stop">Stop</button>
+
+  <div id="status">1 sec update • Trying to follow fundamental</div>
+  <div id="rpm">Estimated RPM: —</div>
+  <div id="level">Sound Level: —</div>
+  <canvas id="waveform" width="900" height="280"></canvas>
+
+  <script>
+    let audioContext, analyser, mediaStream, mediaRecorder;
+    let animationFrame;
+    let lastUpdateTime = 0;
+    let calibrationMultiplier = 0.10;
+    let lastGoodFreq = 0;
+
+    const canvas = document.getElementById('waveform');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('start');
+    const stopBtn = document.getElementById('stop');
+    const status = document.getElementById('status');
+    const rpmDisplay = document.getElementById('rpm');
+    const levelDisplay = document.getElementById('level');
+
+    const MIN_LEVEL_THRESHOLD = 12;
+    const MAX_FREQ = 120;
+
+    document.getElementById('multiplier').addEventListener('input', (e) => {
+      calibrationMultiplier = parseFloat(e.target.value);
+      document.getElementById('multiplierValue').textContent = calibrationMultiplier.toFixed(2);
+    });
+
+    async function startEverything() {
+      startBtn.disabled = true;
+      status.textContent = "Starting...";
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ 
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state !== 'running') await audioContext.resume();
+
+        const source = audioContext.createMediaStreamSource(mediaStream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.8;
+        source.connect(analyser);
+
+        mediaRecorder = new MediaRecorder(mediaStream);
+        mediaRecorder.start();
+
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-block';
+        status.textContent = "🔴 Active — 1 second updates";
+
+        lastUpdateTime = Date.now();
+        drawAndEstimate();
+
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
+        startBtn.disabled = false;
+      }
+    }
+
+    function estimateRPM() {
+      if (!analyser) return 0;
+
+      const dataArray = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(dataArray);
+
+      let sum = 0;
+      for (let val of dataArray) sum += Math.abs(val - 128);
+      const level = sum / dataArray.length;
+      levelDisplay.textContent = `Sound Level: ${Math.round(level)}`;
+
+      if (level < MIN_LEVEL_THRESHOLD) {
+        lastGoodFreq = 0;
+        return 0;
+      }
+
+      let bestOffset = 0;
+      let bestScore = -Infinity;
+      const minOffset = 35;                    // start from lower frequencies
+      const maxOffset = Math.floor(audioContext.sampleRate / 15); // up to \~15 Hz min
+
+      for (let offset = minOffset; offset < maxOffset; offset += 2) {
+        let score = 0;
+        for (let i = 0; i < dataArray.length - offset; i += 4) {
+          score += (dataArray[i] - 128) * (dataArray[i + offset] - 128);
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestOffset = offset;
+        }
+      }
+
+      if (bestOffset === 0) return 0;
+
+      let frequency = audioContext.sampleRate / bestOffset;
+
+      // Prefer lower frequency if scores are close (helps with harmonics)
+      if (lastGoodFreq > 0 && Math.abs(frequency - lastGoodFreq) > 8) {
+        frequency = lastGoodFreq;   // stick to previous if jump is big
+      }
+
+      lastGoodFreq = frequency;
+
+      const cylinders = parseInt(document.getElementById('cylinders').value) || 1;
+      const is4Stroke = document.getElementById('stroke').value === "4";
+      const multiplier = is4Stroke ? cylinders / 2 : cylinders;
+
+      let rpm = Math.round(frequency * 60 / multiplier * calibrationMultiplier);
+      return Math.max(0, rpm);
+    }
+
+    function drawAndEstimate() {
+      animationFrame = requestAnimationFrame(drawAndEstimate);
+
+      const now = Date.now();
+      if (now - lastUpdateTime >= 1000) {
+        const rpm = estimateRPM();
+        rpmDisplay.textContent = `Estimated RPM: ${rpm.toLocaleString()}`;
+        lastUpdateTime = now;
+      }
+
+      if (analyser) {
+        const dataArray = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(dataArray);
+
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#0f0';
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = '#0f0';
+        ctx.beginPath();
+
+        const sliceWidth = canvas.width / dataArray.length;
+        let x = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const y = (dataArray[i] / 128.0) * (canvas.height / 2);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          x += sliceWidth;
+        }
+        ctx.lineTo(canvas.width, canvas.height / 2);
+        ctx.stroke();
+      }
+    }
+
+    function stopEverything() {
+      if (mediaRecorder) mediaRecorder.stop();
+      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      if (animationFrame) cancelAnimationFrame(animationFrame);
+
+      startBtn.style.display = 'inline-block';
+      stopBtn.style.display = 'none';
+      startBtn.disabled = false;
+      status.textContent = "Stopped.";
+    }
+
+    startBtn.addEventListener('click', startEverything);
+    stopBtn.addEventListener('click', stopEverything);
+
+    window.addEventListener('beforeunload', stopEverything);
+  </script>
+</body>
+</html>

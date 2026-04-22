@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=2.0, user-scalable=yes">
+<title>Outlander 400 MAX - Adjustable Waterfall</title>
+<style>
+  body {
+    margin: 0; padding: 0; background: #000; color: #0ff;
+    font-family: monospace; overflow: hidden; touch-action: auto;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+  canvas {
+    image-rendering: crisp-edges; background: #111; flex: 1; display: block;
+  }
+  #controls {
+    position: absolute; top: 12px; left: 12px; background: rgba(0,20,40,0.94);
+    padding: 14px 18px; border-radius: 12px; z-index: 20; border: 1px solid #0aa;
+    box-shadow: 0 4px 20px rgba(0,255,255,0.25); min-width: 320px;
+  }
+  button {
+    padding: 14px 20px; font-size: 18px; background: #0ff; color: #000;
+    border: none; border-radius: 8px; cursor: pointer; width: 100%; font-weight: bold;
+  }
+  button:hover, button:active { background: #0cc; }
+  label {
+    display: block; margin: 12px 0 6px; color: #0ff; font-size: 16px;
+  }
+  input[type="range"] { width: 100%; accent-color: #0ff; height: 8px; }
+  #status { margin-top: 10px; font-size: 15px; opacity: 0.95; }
+  #peakDisplay {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,20,40,0.94); padding: 12px 28px; border-radius: 14px;
+    font-size: 24px; font-weight: bold; z-index: 20; border: 1px solid #0aa;
+    box-shadow: 0 4px 20px rgba(0,255,255,0.25); white-space: nowrap;
+  }
+  .highlight { color: #ff0; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="controls">
+  <button id="btn">Start Waterfall</button>
+  
+  <label>Sensitivity: <span id="sensValue">-100 dB</span></label>
+  <input type="range" id="sensSlider" min="-120" max="-60" value="-100" step="1">
+  
+  <label>Low Freq: <span id="lowValue">10 Hz</span></label>
+  <input type="range" id="lowSlider" min="5" max="60" value="10" step="1">
+  
+  <label>High Freq: <span id="highValue">120 Hz</span></label>
+  <input type="range" id="highSlider" min="40" max="250" value="120" step="1">
+  
+  <label>Target Idle: <span id="targetValue">1250 RPM</span> (<span id="targetHz">20.8 Hz</span>)</label>
+  <input type="range" id="targetSlider" min="600" max="2000" value="1250" step="10">
+  
+  <div id="status">Range: 10–120 Hz • Pinch to zoom if needed</div>
+</div>
+
+<div id="peakDisplay">
+  Peak: <span id="peakFreq" class="highlight">— Hz</span>  RPM: <span id="peakRPM" class="highlight">—</span>
+</div>
+
+<script>
+// ============== Setup ==============
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+
+const sensSlider = document.getElementById('sensSlider');
+const sensValue = document.getElementById('sensValue');
+const lowSlider = document.getElementById('lowSlider');
+const lowValue = document.getElementById('lowValue');
+const highSlider = document.getElementById('highSlider');
+const highValue = document.getElementById('highValue');
+const targetSlider = document.getElementById('targetSlider');
+const targetValue = document.getElementById('targetValue');
+const targetHzEl = document.getElementById('targetHz');
+
+const peakFreqEl = document.getElementById('peakFreq');
+const peakRPMEl = document.getElementById('peakRPM');
+
+let audioContext, analyser, source, dataArray, running = false;
+let minDB = -100;
+let lowFreq = 10;
+let highFreq = 120;
+let targetRPM = 1250;
+
+const WIDTH = 1024;
+const HEIGHT = 560;
+const HISTORY = 340;
+const COLS = 640;
+
+let waterfallBuffer = [];
+let animationFrame;
+
+canvas.width = WIDTH;
+canvas.height = HEIGHT;
+
+function resize() {
+  const scale = Math.min(window.innerWidth / WIDTH, (window.innerHeight * 0.91) / HEIGHT);
+  canvas.style.width = (WIDTH * scale) + 'px';
+  canvas.style.height = (HEIGHT * scale) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Slider listeners
+sensSlider.addEventListener('input', () => {
+  minDB = parseInt(sensSlider.value);
+  sensValue.textContent = minDB + " dB";
+});
+
+lowSlider.addEventListener('input', () => {
+  lowFreq = parseInt(lowSlider.value);
+  lowValue.textContent = lowFreq + " Hz";
+  if (lowFreq >= highFreq) highSlider.value = lowFreq + 5;
+});
+
+highSlider.addEventListener('input', () => {
+  highFreq = parseInt(highSlider.value);
+  highValue.textContent = highFreq + " Hz";
+  if (highFreq <= lowFreq) lowSlider.value = highFreq - 5;
+});
+
+targetSlider.addEventListener('input', () => {
+  targetRPM = parseInt(targetSlider.value);
+  const targetFreq = (targetRPM / 60).toFixed(1);
+  targetValue.textContent = targetRPM + " RPM";
+  targetHzEl.textContent = targetFreq + " Hz";
+});
+
+// ============== Audio ==============
+async function startAudio() {
+  if (running) return;
+  try {
+    statusEl.textContent = "Requesting microphone...";
+    btn.disabled = true;
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+
+    source = audioContext.createMediaStreamSource(stream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 16384;
+    analyser.minDecibels = minDB;
+    analyser.maxDecibels = -6;
+    analyser.smoothingTimeConstant = 0.55;
+
+    source.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    waterfallBuffer = Array.from({length: HISTORY}, () => new Uint8Array(COLS));
+
+    running = true;
+    btn.textContent = "Stop Waterfall";
+    btn.disabled = false;
+    statusEl.textContent = `Range: ${lowFreq}–${highFreq} Hz`;
+
+    drawLoop();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Error: " + err.message;
+    btn.disabled = false;
+  }
+}
+
+function stopAudio() {
+  if (source) source.disconnect();
+  if (audioContext) audioContext.close();
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+  running = false;
+  btn.textContent = "Start Waterfall";
+  statusEl.textContent = "Stopped";
+  peakFreqEl.textContent = "— Hz";
+  peakRPMEl.textContent = "—";
+}
+
+// Color mapping
+function getColor(val) {
+  const i = Math.pow(val, 0.6) * 2.1;
+  if (i < 0.25) return [10, 30, 100];
+  if (i < 0.45) return [30, 100, 255];
+  if (i < 0.65) return [0, 255, 240];
+  if (i < 0.8)  return [80, 255, 100];
+  if (i < 0.92) return [255, 255, 60];
+  return [255, 255, 255];
+}
+
+// ============== Draw Loop ==============
+function drawLoop() {
+  if (!running) return;
+  animationFrame = requestAnimationFrame(drawLoop);
+
+  analyser.minDecibels = minDB;
+  analyser.getByteFrequencyData(dataArray);
+
+  const sampleRate = audioContext.sampleRate;
+  const fftSize = analyser.fftSize;
+  const lowBin = Math.round(lowFreq * fftSize / sampleRate);
+  const highBin = Math.round(highFreq * fftSize / sampleRate);
+
+  const slice = new Uint8Array(COLS);
+  let maxVal = -1;
+  let maxIndex = 0;
+
+  for (let i = 0; i < COLS; i++) {
+    const frac = i / (COLS - 1);
+    const bin = Math.floor(lowBin + frac * (highBin - lowBin));
+    const value = dataArray[Math.min(bin, dataArray.length - 1)] || 0;
+    slice[i] = value;
+    if (value > maxVal) {
+      maxVal = value;
+      maxIndex = i;
+    }
+  }
+
+  waterfallBuffer.unshift(slice);
+  if (waterfallBuffer.length > HISTORY) waterfallBuffer.pop();
+
+  // Render waterfall
+  const imageData = ctx.createImageData(WIDTH, HEIGHT);
+  const data = imageData.data;
+
+  for (let y = 0; y < HEIGHT; y++) {
+    const rowIdx = Math.floor((y / HEIGHT) * HISTORY);
+    const row = waterfallBuffer[rowIdx] || slice;
+    for (let x = 0; x < WIDTH; x++) {
+      const col = Math.floor((x / WIDTH) * (COLS - 1));
+      const val = (row[col] || 0) / 255;
+      const [r, g, b] = getColor(val);
+      const idx = (y * WIDTH + x) * 4;
+      data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = 255;
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  // Live top bar
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (let x = 0; x < WIDTH; x++) {
+    const col = Math.floor((x / WIDTH) * (COLS - 1));
+    const h = (slice[col] / 255) * 58;
+    ctx.fillRect(x, 0, 1, h);
+  }
+
+  // Target vertical line
+  const targetFreq = targetRPM / 60;
+  if (targetFreq >= lowFreq && targetFreq <= highFreq) {
+    const targetX = Math.floor(((targetFreq - lowFreq) / (highFreq - lowFreq)) * WIDTH);
+    ctx.strokeStyle = 'rgba(0, 255, 120, 0.9)';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([12, 8]);
+    ctx.beginPath();
+    ctx.moveTo(targetX, 12);
+    ctx.lineTo(targetX, HEIGHT - 50);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Peak highlight
+  const peakX = Math.floor((maxIndex / (COLS - 1)) * WIDTH);
+  ctx.fillStyle = 'rgba(255, 240, 80, 0.95)';
+  ctx.fillRect(peakX - 3, 0, 6, 75);
+
+  // Labels (bigger font)
+  ctx.fillStyle = '#0ff';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText(lowFreq + ' Hz', 14, HEIGHT - 22);
+  ctx.fillText(highFreq + ' Hz', WIDTH - 95, HEIGHT - 22);
+
+  // Peak values
+  const peakFreq = lowFreq + (maxIndex / (COLS - 1)) * (highFreq - lowFreq);
+  const rpm = Math.round(peakFreq * 60);
+  peakFreqEl.textContent = peakFreq.toFixed(1) + " Hz";
+  peakRPMEl.textContent = rpm.toLocaleString();
+}
+
+btn.addEventListener('click', () => running ? stopAudio() : startAudio());
+</script>
+</body>
+</html>
